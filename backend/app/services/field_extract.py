@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any
 
 from app.store import store
@@ -143,3 +144,103 @@ class FieldExtractService:
         results[f"field_{entry_id}"] = result
         store.set_pipeline_state("content_extract_results", results)
         return result
+
+    # ------------------------------------------------------------------
+    # 跨模块回写链路：消费解析规则事件记录
+    # ------------------------------------------------------------------
+    def consume_parse_rule_events(self) -> dict[str, Any]:
+        """读取解析规则事件记录，只为本批通过校验的规则同步/确认字段模板。
+
+        - 校验拦截事件：不生成任何模板，回写状态记为「已拦截」；
+        - 校验通过/已发布事件：确保存在对应模板（由解析规则侧幂等创建），
+          并把同步游标推进到该事件；
+        - 已撤下/已废弃事件：停用对应模板。
+        重复消费同一事件不会生成重复模板。
+        """
+        from app.services.parse_rule_event import (
+            BLOCKED_STATUS,
+            MODULE as EVENT_MODULE,
+            PASS_STATUS,
+            PUBLISHED_STATUS,
+        )
+
+        sync_cursor: dict[str, Any] = store.pipeline_state("parse_rule_event_sync") or {}
+        # 游标按事件ID记录最近一次消费到的状态，事件状态再次变化时允许重新消费
+        synced_map: dict[str, str] = sync_cursor.setdefault("synced_events", {})
+        blocked_events: list[int] = sync_cursor.setdefault("blocked_event_ids", [])
+        events = store.rows(EVENT_MODULE)
+        created_or_confirmed = 0
+        blocked = 0
+        withdrawn = 0
+
+        for event in events:
+            event_id = int(event["id"])
+            rule_id = int(event.get("解析规则ID", 0))
+            event_status = str(event.get("事件状态") or "")
+            if event_status == BLOCKED_STATUS:
+                if event_id not in blocked_events:
+                    blocked_events.append(event_id)
+                # 拦截规则不得保留由其产生的模板
+                for rel in store.get_relations("parse_to_field", source_module="parse_rule", source_id=rule_id):
+                    candidate = store.find(MODULE, int(rel["target_id"]))
+                    if candidate is not None and candidate.get("选择器") == event.get("选择器表达式"):
+                        candidate["status"] = "已废弃"
+                        candidate["pending"] = False
+                blocked += 1
+                synced_map.pop(str(event_id), None)
+                continue
+            if event_status in {"已撤下", "已废弃"}:
+                template_id = event.get("关联模板ID")
+                if template_id is not None:
+                    template = store.find(MODULE, int(template_id))
+                    if template is not None and template.get("status") != "已废弃":
+                        template["status"] = "已废弃"
+                        template["pending"] = False
+                        withdrawn += 1
+                synced_map[str(event_id)] = event_status
+                continue
+            if event_status not in {PASS_STATUS, PUBLISHED_STATUS} or not event.get("校验通过"):
+                continue
+            if synced_map.get(str(event_id)) == event_status:
+                # 幂等：同一事件同一状态重复消费不重复生成模板
+                continue
+            rule = store.find("parse_rule", rule_id)
+            if rule is None or not str(rule.get("选择器表达式") or "").strip():
+                continue
+            template_code = f"GEN-{rule.get('规则编号')}-{rule.get('规则版本')}-FE"
+            template = store.find_by_field(MODULE, "模板编号", template_code)
+            if template is None:
+                payload = {
+                    "模板编号": template_code,
+                    "关联种子": rule.get("规则编号"),
+                    "字段名": rule.get("目标字段名"),
+                    "选择器": rule.get("选择器表达式"),
+                    "精炼规则": rule.get("正则过滤") or "",
+                    "输出类型": rule.get("提取方式") or "text",
+                    "可为空": "否",
+                    "抽取优先级": "10",
+                }
+                template, missing = self.create_entry(payload)
+                if missing:
+                    continue
+                store.add_relation("parse_to_field", "parse_rule", rule_id, MODULE, int(template["id"]))
+            template["来源规则ID"] = rule_id
+            template["来源事件ID"] = event_id
+            template["版本角色"] = "当前发布版本" if event_status == PUBLISHED_STATUS else template.get("版本角色", "校验通过待发布")
+            synced_map[str(event_id)] = event_status
+            created_or_confirmed += 1
+
+        sync_cursor["last_consumed_at"] = datetime.now().isoformat(timespec="seconds")
+        store.set_pipeline_state("parse_rule_event_sync", sync_cursor)
+        return {
+            "ok": True,
+            "synced": created_or_confirmed,
+            "blocked": blocked,
+            "withdrawn": withdrawn,
+            "total_events": len(events),
+            "cursor": sync_cursor,
+        }
+
+    def list_synced_templates(self) -> list[dict[str, Any]]:
+        """列出由解析规则事件记录同步而来的字段模板。"""
+        return [row for row in store.rows(MODULE) if row.get("来源事件ID") is not None]

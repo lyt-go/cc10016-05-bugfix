@@ -14,6 +14,8 @@ class Store:
         self._tables: dict[str, list[dict[str, Any]]] = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
+        # 解析规则事件记录：独立主数据表，存放规则状态变化与选择器拦截原因
+        self._tables["parse_rule_event"] = []
         # 跨模块链路状态存储
         self._pipeline_states: dict[str, Any] = {
             "source_validation_cache": {},   # crawl_source 连接校验缓存
@@ -30,6 +32,8 @@ class Store:
             "data_validate_reports": {},     # data_validate 校验报告
             "result_store_partitions": {},   # result_store 分区元数据
             "rate_limit_states": {},         # rate_limit 令牌桶状态
+            # 解析规则事件记录 -> 字段抽取的跨模块回写链路同步游标
+            "parse_rule_event_sync": {},
         }
         # 模块间关系索引（外键映射）——基于 seed 数据自动构建
         self._relations: dict[str, list[dict[str, Any]]] = {
@@ -50,6 +54,11 @@ class Store:
             "extract_to_convert": [],  # content_extract.id -> format_convert
         }
         self._build_relations()
+
+    def seed_parse_rule_events(self) -> None:
+        """为预置解析规则补录事件记录（在 store 构造完成后调用，避免循环导入）。"""
+        from app.services.parse_rule_event import ParseRuleEventService
+        ParseRuleEventService().seed_from_existing_rules()
 
     def _build_relations(self) -> None:
         """根据 seed 数据中的业务语义自动建立跨模块关系。"""
@@ -215,8 +224,12 @@ class Store:
         return result
 
     def overview(self) -> dict[str, object]:
+        # 事件记录等内部主数据表不进入业务模块看板
+        internal_tables = {"parse_rule_event"}
         modules: list[dict[str, object]] = []
         for name in self.module_names():
+            if name in internal_tables:
+                continue
             rows = self.rows(name)
             modules.append({
                 "name": name,

@@ -42,7 +42,12 @@ def run_source_config_chain(source_id: int, seed_values: dict[str, Any],
     if missing:
         return {"ok": False, "stage": "parse_rule_creation", "error": missing}
 
-    # 生成字段抽取模板
+    # 选择器校验结果与发布状态同时提交；校验被拦截则终止链路，不生成空模板
+    validated, validate_msg = parse_svc.run_action(rule["id"], "提交校验")
+    if validated is None:
+        return {"ok": False, "stage": "parse_rule_validation", "error": validate_msg}
+
+    # 生成字段抽取模板（仅校验通过的规则会产出）
     fields = parse_svc.generate_field_extracts(rule["id"])
 
     return {

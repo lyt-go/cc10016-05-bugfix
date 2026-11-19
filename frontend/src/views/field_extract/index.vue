@@ -7,6 +7,7 @@
       </div>
       <div class="page-actions">
         <button class="btn primary" data-testid="open-create" type="button" @click="openCreate">登记抽取模板</button>
+        <button class="btn" data-testid="sync-events" type="button" @click="syncFromEvents">同步解析规则事件</button>
         <button class="btn" data-testid="export" type="button" @click="exportRows">导出字段抽取清单</button>
       </div>
     </header>
@@ -31,12 +32,22 @@
       <thead>
         <tr>
           <th v-for="column in columns" :key="column">{{ column }}</th>
+          <th>版本角色</th>
+          <th>来源事件</th>
           <th>可执行动作</th>
         </tr>
       </thead>
       <tbody>
         <tr v-for="row in rows" :key="String(row.id)" :data-testid="`row-${row.id}`" :data-status="String(row.status)">
           <td v-for="column in columns" :key="column">{{ row[column] ?? '—' }}</td>
+          <td>
+            <span v-if="row['版本角色']" class="badge" :class="`role-${row['版本角色']}`">{{ row['版本角色'] }}</span>
+            <span v-else>—</span>
+          </td>
+          <td>
+            <span v-if="row['来源事件ID']" class="badge evt-已发布">事件 #{{ row['来源事件ID'] }}</span>
+            <span v-else>—</span>
+          </td>
           <td class="row-actions">
             <button
               v-for="action in actions"
@@ -51,7 +62,7 @@
           </td>
         </tr>
         <tr v-if="!rows.length">
-          <td :colspan="columns.length + 1" class="empty-state">暂无字段抽取数据，可先登记抽取模板</td>
+          <td :colspan="columns.length + 3" class="empty-state">暂无字段抽取数据，可先登记抽取模板</td>
         </tr>
       </tbody>
     </table>
@@ -103,12 +114,25 @@ const createValues = ref<Record<string, string>>({})
 const stats = computed(() => [
   { label: metricNames[0], value: total.value },
   { label: metricNames[1], value: rows.value.filter((row) => row.status === statuses[1]).length },
-  { label: metricNames[2], value: rows.value.filter((row) => row.status === statuses[statuses.length - 1]).length },
+  { label: metricNames[2], value: rows.value.filter((row) => row.status === statuses[2]).length },
 ])
 
 function resetFilters() {
   filters.value = {}
   void reload()
+}
+
+async function syncFromEvents() {
+  errorMessage.value = ''
+  try {
+    const response = await request(`${ENDPOINT}/consume_parse_rule_events`, { method: 'POST' })
+    const payload = await response.json()
+    if (!response.ok || !payload.ok) throw new Error('事件同步失败')
+    await reload()
+    errorMessage.value = ''
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '事件同步失败'
+  }
 }
 
 async function exportRows() {

@@ -42,9 +42,19 @@ def chain_source_seed_parse_field(source_id: int) -> dict[str, Any]:
     seed_id = int(seed["id"])
     rules = seed_svc.get_linked_parse_rules(seed_id)
     fields: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
     for rule in rules:
         rule_id = int(rule["id"])
+        # 字段抽取只消费通过校验的规则；未校验规则先提交校验，被拦截的规则跳过
+        if rule.get("status") == "草稿":
+            checked, check_msg = parse_svc.run_action(rule_id, "提交校验")
+            if checked is None:
+                blocked.append({"rule_id": rule_id, "reason": check_msg})
+                continue
         generated = parse_svc.generate_field_extracts(rule_id)
+        if not generated:
+            blocked.append({"rule_id": rule_id, "reason": "规则未通过选择器校验，事件记录未放行模板生成"})
+            continue
         fields.extend(generated)
         # 同时抽取示例字段
         for fe in generated:
@@ -59,6 +69,7 @@ def chain_source_seed_parse_field(source_id: int) -> dict[str, Any]:
         "seed_id": seed_id,
         "parse_rules": [int(r["id"]) for r in rules],
         "field_extracts": [int(f["id"]) for f in fields],
+        "blocked_rules": blocked,
         "seed": {"种子编号": seed.get("种子编号"), "目标URL模式": seed.get("目标URL模式")},
     }
 

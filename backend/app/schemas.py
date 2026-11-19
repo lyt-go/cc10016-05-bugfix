@@ -33,6 +33,8 @@ class ActionPayload(BaseModel):
 
     action: str
     remark: str | None = None
+    # 解析规则发布模式：replace 撤下旧模板，parallel 新旧模板并存
+    mode: str | None = None
 
 
 

@@ -14,6 +14,9 @@ from app.store import store
 
 app = FastAPI(title="多源数据采集编排平台", version="1.0.0")
 
+# 预置解析规则补录事件记录（store 构造完成后执行，避免服务层与仓库层循环导入）
+store.seed_parse_rule_events()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,

@@ -65,6 +65,21 @@ def export_entries(
         headers={"Content-Disposition": 'attachment; filename="field_extract.csv"'})
 
 
+@router.post("/consume_parse_rule_events")
+def consume_parse_rule_events() -> dict:
+    """跨模块回写链路：字段抽取读取解析规则事件记录并同步模板。
+
+    只为本批通过校验的规则生成/确认模板，被拦截选择器不产出任何模板。
+    """
+    return service.consume_parse_rule_events()
+
+
+@router.get("/synced_from_events")
+def synced_from_events() -> dict:
+    """列出经由解析规则事件记录同步而来的字段模板。"""
+    return {"items": service.list_synced_templates()}
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
     """读取单条抽取模板明细；不存在时给出可读的错误说明。"""

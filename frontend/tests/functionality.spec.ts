@@ -449,6 +449,23 @@ const dagModules = modules.filter(m => m.shape === 'dag-graph')
 const timelineModules = modules.filter(m => m.shape === 'job-timeline')
 const analysisModules = modules.filter(m => m.shape === 'analysis-dashboard')
 
+// 部分模块有字段口径约束（如解析规则的选择器类型/版本格式），登记时需要合法值
+function buildCreateValues(mod: ModuleCase): string[] {
+  if (mod.key === 'parse_rule') {
+    return [
+      `验收-PARS-${Date.now()}`, // 规则编号
+      '验收字段', // 目标字段名
+      'css', // 选择器类型（口径内）
+      '.acceptance .item', // 选择器表达式（合法 CSS）
+      'text', // 提取方式（口径内）
+      '默认值', // 默认值
+      '', // 正则过滤
+      'v1.0', // 规则版本（符合 vX.Y 范围）
+    ]
+  }
+  return mod.fields.map((f, i) => `验收-${mod.key}-${i+1}`)
+}
+
 function parseCsv(text: string): string[][] {
   const records: string[][] = []
   let row: string[] = []
@@ -485,29 +502,31 @@ test('CRUD模块：筛选、导出、登记、动作、指标全链路', async (
     await page.goto(`/${mod.key}`)
     await page.waitForTimeout(3000)
     const bodyRows = page.locator('tbody tr[data-testid^="row-"]')
-    await expect(bodyRows).toHaveCount(3)
+    const initialCount = await bodyRows.count()
+    expect(initialCount).toBeGreaterThan(0)
     const firstValue = await bodyRows.nth(0).locator('td').nth(0).innerText()
 
     await page.getByTestId(`filter-${mod.fields[0]}`).fill(firstValue)
     await page.getByTestId('query').click()
     await expect(bodyRows).toHaveCount(1)
     await page.getByTestId('reset').click()
-    await expect(bodyRows).toHaveCount(3)
+    await expect(bodyRows).toHaveCount(initialCount)
 
     const downloadPromise = page.waitForEvent('download')
     await page.getByTestId('export').click()
     const download = await downloadPromise
     expect(download.suggestedFilename()).toBe(`${mod.key}.csv`)
 
-    const createdValues = mod.fields.map((f, i) => `验收-${mod.key}-${i+1}`)
+    const createdValues = buildCreateValues(mod)
     await page.getByTestId('open-create').click()
     await expect(page.getByTestId('create-modal')).toBeVisible()
     for (const [i, field] of mod.fields.entries()) {
-      await page.getByTestId(`create-${field}`).fill(createdValues[i])
+      const input = page.getByTestId(`create-${field}`)
+      await input.fill(createdValues[i])
     }
     await page.getByTestId('submit-create').click()
     await expect(page.getByTestId('create-modal')).toHaveCount(0)
-    await expect(bodyRows).toHaveCount(4)
+    await expect(bodyRows).toHaveCount(initialCount + 1)
 
     const createdRow = page.locator('tbody tr').filter({ hasText: createdValues[0] })
     for (const [i, action] of mod.actions.entries()) {
@@ -515,6 +534,69 @@ test('CRUD模块：筛选、导出、登记、动作、指标全链路', async (
       await expect(createdRow).toHaveAttribute('data-status', mod.actionTargets[i])
     }
   }
+
+  expect(browserErrors).toEqual([])
+})
+
+test('解析规则：无效选择器被拦截、有效规则发布、事件抽屉展示拒绝原因', async ({ page }) => {
+  test.setTimeout(120_000)
+  const browserErrors: string[] = []
+  page.on('pageerror', e => browserErrors.push(e.message))
+  page.on('response', r => { if (r.url().includes('/api/') && r.status()>=400) browserErrors.push(`${r.status} ${r.url()}`) })
+
+  await page.goto('/parse_rule')
+  await page.waitForTimeout(2000)
+  const beforeCount = await page.locator('tbody tr[data-testid^="row-"]').count()
+
+  // 登记一条无效 XPath 规则
+  const badCode = `验收-BAD-XPATH-${Date.now()}`
+  await page.getByTestId('open-create').click()
+  await expect(page.getByTestId('create-modal')).toBeVisible()
+  const badValues = [badCode, '坏字段', 'xpath', 'not-a-valid-xpath', 'text', '', '', 'v1.0']
+  for (const [i, field] of modules.find(m => m.key === 'parse_rule')!.fields.entries()) {
+    await page.getByTestId(`create-${field}`).fill(badValues[i])
+  }
+  await page.getByTestId('submit-create').click()
+  await expect(page.getByTestId('create-modal')).toHaveCount(0)
+
+  const badRow = page.locator('tbody tr').filter({ hasText: badCode }).first()
+  await expect(badRow).toHaveAttribute('data-status', '草稿')
+  // 行内展示拦截徽章
+  await expect(badRow.getByTestId(/^check-/)).toContainText('拦截')
+
+  // 提交校验被后端拒绝，规则状态保持草稿，错误原因显示在页脚
+  await badRow.getByRole('button', { name: '提交校验', exact: true }).click()
+  await expect(page.getByTestId('page-error')).toContainText('拦截')
+  await expect(badRow).toHaveAttribute('data-status', '草稿')
+
+  // 事件抽屉展示校验拦截记录与原因，关闭后无残留
+  await badRow.getByTestId(/^events-/).click()
+  await expect(page.getByTestId('event-drawer')).toBeVisible()
+  await expect(page.getByTestId('event-timeline')).toContainText('校验拦截')
+  await expect(page.getByTestId('event-timeline')).toContainText('XPath')
+  await page.getByTestId('close-drawer').click()
+  await expect(page.getByTestId('event-drawer')).toHaveCount(0)
+
+  // 登记一条有效 CSS 规则并完成发布
+  const goodCode = `验收-GOOD-CSS-${Date.now()}`
+  await page.getByTestId('open-create').click()
+  const goodValues = [goodCode, '好字段', 'css', '.price > span', 'text', '', '', 'v1.0']
+  for (const [i, field] of modules.find(m => m.key === 'parse_rule')!.fields.entries()) {
+    await page.getByTestId(`create-${field}`).fill(goodValues[i])
+  }
+  await page.getByTestId('submit-create').click()
+  await expect(page.getByTestId('create-modal')).toHaveCount(0)
+  const goodRow = page.locator('tbody tr').filter({ hasText: goodCode }).first()
+  await goodRow.getByRole('button', { name: '提交校验', exact: true }).click()
+  await expect(goodRow).toHaveAttribute('data-status', '待校验')
+  await goodRow.getByRole('button', { name: '标记生效', exact: true }).click()
+  await expect(goodRow).toHaveAttribute('data-status', '已生效')
+  await expect(goodRow).toContainText('当前发布版本')
+
+  // 字段抽取侧出现来源事件模板，且只有一个当前发布版本
+  await page.goto('/field_extract')
+  await page.waitForTimeout(2000)
+  await expect(page.locator('tbody tr').filter({ hasText: goodCode })).toHaveCount(1)
 
   expect(browserErrors).toEqual([])
 })
